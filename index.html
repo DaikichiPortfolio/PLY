@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Point Cloud AR with UI</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+
+      /* カスタムUI */
+      #ui {
+        position: absolute;
+        bottom: 20px;
+        left: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.5);
+        color: white;
+        padding: 10px;
+        border-radius: 12px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: center;
+        font-family: sans-serif;
+        font-size: 14px;
+        z-index: 10;
+      }
+
+      input[type="range"] {
+        width: 120px;
+      }
+
+      button {
+        background: #2196f3;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        color: white;
+        cursor: pointer;
+      }
+
+      /* Start AR ボタンを左上に配置 */
+      .ar-button {
+        position: absolute !important;
+        top: 10px;
+        left: 10px;
+        z-index: 20;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- UIパネル -->
+    <div id="ui">
+      <label>点サイズ:
+        <input type="range" id="sizeSlider" min="0.001" max="0.05" step="0.001" value="0.01" />
+      </label>
+      <button id="toggleButton">非表示</button>
+    </div>
+
+    <script type="module">
+      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js';
+      import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/webxr/ARButton.js';
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera();
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // ARButton左上に配置
+      const arButton = ARButton.createButton(renderer, {
+        requiredFeatures: ['hit-test']
+      });
+      arButton.classList.add('ar-button');
+      document.body.appendChild(arButton);
+
+      let controller, reticle, hitTestSource = null, localSpace = null;
+      let pointCloud = null;
+
+      // リテクル（平面表示）
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.1, 0.15, 32).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+      );
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      controller = renderer.xr.getController(0);
+      scene.add(controller);
+
+      controller.addEventListener('select', () => {
+        if (reticle.visible && pointCloud) {
+          pointCloud.position.setFromMatrixPosition(reticle.matrix);
+          pointCloud.visible = true;
+        }
+      });
+
+      renderer.xr.addEventListener('sessionstart', async () => {
+        const session = renderer.xr.getSession();
+        const viewerSpace = await session.requestReferenceSpace('viewer');
+        hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+        localSpace = await session.requestReferenceSpace('local');
+
+        session.addEventListener('end', () => {
+          hitTestSource = null;
+          localSpace = null;
+        });
+      });
+
+      // 点群読み込み
+      fetch('pointcloud_tameshi.xyz')
+        .then(res => res.text())
+        .then(text => {
+          const lines = text.trim().split('\n');
+          const positions = new Float32Array(lines.length * 3);
+          const colors = new Float32Array(lines.length * 3);
+
+          lines.forEach((line, i) => {
+            const [x, y, z, r, g, b] = line.trim().split(/\s+/).map(Number);
+            positions.set([x, y, z], i * 3);
+            colors.set([r / 255, g / 255, b / 255], i * 3);
+          });
+
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+          // 点群中心を原点に移動（配置しやすく）
+          const center = new THREE.Vector3();
+          for (let i = 0; i < positions.length; i += 3) {
+            center.add(new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]));
+          }
+          center.divideScalar(positions.length / 3);
+          geometry.translate(-center.x, -center.y, -center.z);
+
+          const material = new THREE.PointsMaterial({
+            size: 0.01,
+            sizeAttenuation: true,
+            vertexColors: true,
+          });
+
+          pointCloud = new THREE.Points(geometry, material);
+          pointCloud.visible = false;
+          scene.add(pointCloud);
+        });
+
+      // ARレンダリングループ
+      renderer.setAnimationLoop((timestamp, frame) => {
+        if (frame && hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length > 0) {
+            const hit = hitTestResults[0];
+            const pose = hit.getPose(localSpace);
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+          } else {
+            reticle.visible = false;
+          }
+        }
+
+        renderer.render(scene, camera);
+      });
+
+      // UI操作
+      const sizeSlider = document.getElementById('sizeSlider');
+      const toggleButton = document.getElementById('toggleButton');
+
+      sizeSlider.addEventListener('input', () => {
+        if (pointCloud) {
+          pointCloud.material.size = parseFloat(sizeSlider.value);
+        }
+      });
+
+      toggleButton.addEventListener('click', () => {
+        if (pointCloud) {
+          pointCloud.visible = !pointCloud.visible;
+          toggleButton.textContent = pointCloud.visible ? '非表示' : '表示';
+        }
+      });
+    </script>
+  </body>
+</html>
